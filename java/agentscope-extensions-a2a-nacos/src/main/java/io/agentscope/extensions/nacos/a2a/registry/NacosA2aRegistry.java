@@ -28,6 +28,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Properties;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * AgentScope Extensions for Runtime Registry A2A AgentCard and A2A instance endpoint to Nacos.
@@ -51,7 +53,7 @@ public class NacosA2aRegistry {
     /**
      * Register A2A agent card and endpoint to Nacos
      *
-     * @param agentCard the agent card to register
+     * @param agentCard     the agent card to register
      * @param a2aProperties the properties for A2A registry
      */
     public void registerAgent(io.a2a.spec.AgentCard agentCard, NacosA2aRegistryProperties a2aProperties) {
@@ -74,12 +76,31 @@ public class NacosA2aRegistry {
     }
     
     private void registerEndpoint(AgentCard agentCard, NacosA2aRegistryProperties a2aProperties) throws NacosException {
-        AgentEndpoint endpoint = new AgentEndpoint();
-        endpoint.setVersion(agentCard.getVersion());
-        endpoint.setPath(a2aProperties.endpointPath());
-        endpoint.setTransport(agentCard.getPreferredTransport());
-        endpoint.setAddress(a2aProperties.endpointAddress());
-        endpoint.setPort(a2aProperties.endpointPort());
-        a2aService.registerAgentEndpoint(agentCard.getName(), endpoint);
+        if (a2aProperties.transportProperties().isEmpty()) {
+            return;
+        }
+        if (a2aProperties.transportProperties().size() == 1) {
+            AgentEndpoint endpoint = buildAgentEndpoint(a2aProperties.transportProperties().values().iterator().next(),
+                    agentCard.getVersion());
+            a2aService.registerAgentEndpoint(agentCard.getName(), endpoint);
+        } else {
+            Set<AgentEndpoint> endpoints = a2aProperties.transportProperties().values().stream()
+                    .map(transportProperties -> buildAgentEndpoint(transportProperties, agentCard.getVersion()))
+                    .collect(Collectors.toSet());
+            a2aService.registerAgentEndpoint(agentCard.getName(), endpoints);
+        }
+    }
+    
+    private AgentEndpoint buildAgentEndpoint(NacosA2aRegistryTransportProperties transportProperties, String version) {
+        AgentEndpoint result = new AgentEndpoint();
+        result.setTransport(transportProperties.transport());
+        result.setAddress(transportProperties.endpointAddress());
+        result.setPort(transportProperties.endpointPort());
+        result.setPath(transportProperties.endpointPath());
+        result.setSupportTls(transportProperties.isSupportTls());
+        result.setVersion(version);
+        result.setProtocol(transportProperties.endpointProtocol());
+        result.setQuery(transportProperties.endpointQuery());
+        return result;
     }
 }

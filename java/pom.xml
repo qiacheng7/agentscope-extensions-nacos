@@ -62,7 +62,7 @@
     </modules>
     
     <properties>
-        <revision>0.2.0</revision>
+        <revision>0.2.1-SNAPSHOT</revision>
         
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <java.version>17</java.version>
@@ -71,7 +71,7 @@
         
         <agentscope.version>0.2.1</agentscope.version>
         <agentscope-runtime.version>0.1.2</agentscope-runtime.version>
-        <nacos.version>3.1.0</nacos.version>
+        <nacos.version>3.1.1</nacos.version>
         <a2a-java.version>0.3.2.Final</a2a-java.version>
         <mcp-java.version>0.14.1</mcp-java.version>
         <logback.version>1.5.20</logback.version>
