@@ -25,8 +25,8 @@ import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.MsgRole;
 import io.agentscope.core.message.TextBlock;
 import io.agentscope.extensions.a2a.agent.A2aAgent;
-import io.agentscope.extensions.a2a.agent.A2aAgentConfig;
-import io.agentscope.extensions.nacos.a2a.discovery.NacosAgentCardProducer;
+import io.agentscope.extensions.a2a.agent.card.AgentCardResolver;
+import io.agentscope.extensions.nacos.a2a.discovery.NacosAgentCardResolver;
 import reactor.core.publisher.Flux;
 
 import java.io.BufferedReader;
@@ -42,9 +42,9 @@ public class A2aAgentCallerExample {
     
     public static void main(String[] args) throws NacosException {
         AiService aiService = buildNacosAiClient();
-        A2aAgentConfig a2aAgentConfig = new A2aAgentConfig.A2aAgentConfigBuilder().agentCardProducer(
-                new NacosAgentCardProducer(aiService)).build();
-        A2aAgent agent = new A2aAgent("agentscope-a2a-example-agent", a2aAgentConfig);
+        AgentCardResolver agentCardResolver = new NacosAgentCardResolver(aiService);
+        A2aAgent agent = A2aAgent.builder().name("agentscope-a2a-example-agent").agentCardResolver(agentCardResolver)
+                .build();
         startExample(agent);
     }
     

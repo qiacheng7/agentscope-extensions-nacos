@@ -32,18 +32,21 @@ import io.agentscope.core.hook.HookEvent;
 import io.agentscope.core.hook.PostCallEvent;
 import io.agentscope.core.hook.PreCallEvent;
 import io.agentscope.core.interruption.InterruptContext;
+import io.agentscope.core.memory.InMemoryMemory;
+import io.agentscope.core.memory.Memory;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.TextBlock;
-import io.agentscope.extensions.a2a.agent.card.AgentCardProducer;
+import io.agentscope.extensions.a2a.agent.card.AgentCardResolver;
+import io.agentscope.extensions.a2a.agent.card.FixedAgentCardResolver;
 import io.agentscope.extensions.a2a.agent.event.ClientEventContext;
 import io.agentscope.extensions.a2a.agent.event.ClientEventHandlerRouter;
-import io.agentscope.extensions.a2a.agent.utils.DateTimeSerializationUtil;
 import io.agentscope.extensions.a2a.agent.utils.LoggerUtil;
 import io.agentscope.extensions.a2a.agent.utils.MessageConvertUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import reactor.core.publisher.Mono;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.util.function.BiConsumer;
@@ -55,12 +58,11 @@ import java.util.function.BiConsumer;
  * <pre>{@code
  *  // Simple usage.
  *  AgentCard agentCard = generateAgentCardByCode();
- *  A2aAgent a2aAgent = new A2aAgent("remote-agent-name", agentCard);
+ *  A2aAgent a2aAgent = A2aAgent.builder().name("remote-agent-name").agentCard(agentCard).build();
  *
  *  // Auto get AgentCard
  *  AgentCardProducer agentCardProducer = new WellKnownAgentCardProducer("http://127.0.0.1:8080", "/.well-known/agent-card.json", Map.of());
- *  A2aAgentConfig a2aAgentConfig = A2aAgentConfig.builder().agentCardProducer(agentCardProducer).build()
- *  A2aAgent a2aAgent = new A2aAgent("remote-agent-name", a2aAgentConfig);
+ *  A2aAgent a2aAgent = A2aAgent a2aAgent = A2aAgent.builder().name("remote-agent-name").agentCardResolver(agentCardProducer).build();
  * }</pre>
  *
  * @author xiweng.yy
@@ -71,7 +73,11 @@ public class A2aAgent extends AgentBase {
     
     private static final String INTERRUPT_HINT_PATTERN = "Task %s interrupt successfully.";
     
+    private final AgentCardResolver agentCardResolver;
+    
     private final A2aAgentConfig a2aAgentConfig;
+    
+    private final Memory memory;
     
     private final ClientEventHandlerRouter clientEventHandlerRouter;
     
@@ -87,42 +93,36 @@ public class A2aAgent extends AgentBase {
      */
     private ClientEventContext clientEventContext;
     
-    public A2aAgent(String name, AgentCard agentCard) {
-        this(name, new A2aAgentConfig.A2aAgentConfigBuilder().agentCard(agentCard).build());
-    }
-    
-    public A2aAgent(String name, A2aAgentConfig a2aAgentConfig) {
-        this(name, a2aAgentConfig, null);
-    }
-    
-    public A2aAgent(String name, A2aAgentConfig a2aAgentConfig, List<Hook> hooks) {
+    private A2aAgent(String name, AgentCardResolver agentCardResolver, A2aAgentConfig a2aAgentConfig, Memory memory,
+            List<Hook> hooks) {
         super(name, null, hooks);
         this.a2aAgentConfig = a2aAgentConfig;
-        LoggerUtil.debug(log, "A2aAgent init with config: {}", a2aAgentConfig);
-        getHooks().add(new A2aClientLifecycleHook());
-        AgentCardProducer agentCardProducer = a2aAgentConfig.agentCardProducer();
-        if (null == agentCardProducer) {
+        if (null == agentCardResolver) {
             throw new IllegalArgumentException("AgentCardProducer cannot be null");
         }
-        if (a2aAgentConfig.adaptOldVersionA2aDateTimeSerialization()) {
-            DateTimeSerializationUtil.adaptOldVersionA2aDateTimeSerialization();
-        }
+        this.agentCardResolver = agentCardResolver;
+        this.memory = memory;
+        LoggerUtil.debug(log, "A2aAgent init with config: {}", a2aAgentConfig);
+        getHooks().add(new A2aClientLifecycleHook());
         this.clientEventHandlerRouter = new ClientEventHandlerRouter();
     }
     
     @Override
     public String getDescription() {
-        return a2aAgentConfig.agentCardProducer().produce(getName()).description();
+        return agentCardResolver.getAgentCard(getName()).description();
     }
     
     @Override
     protected Mono<Msg> doCall(List<Msg> msgs) {
+        if (msgs != null && !msgs.isEmpty()) {
+            msgs.forEach(memory::addMessage);
+        }
         LoggerUtil.info(log, "[{}] A2aAgent start call.", currentRequestId);
         LoggerUtil.debug(log, "[{}] A2aAgent call with input messages: ", currentRequestId);
-        LoggerUtil.logTextMsgDetail(log, msgs);
+        LoggerUtil.logTextMsgDetail(log, memory.getMessages());
         clientEventContext.setHooks(getSortedHooks());
         return Mono.defer(() -> {
-            Message message = MessageConvertUtil.convertFromMsg(msgs);
+            Message message = MessageConvertUtil.convertFromMsg(memory.getMessages());
             return checkInterruptedAsync().then(doExecute(message));
         });
     }
@@ -141,7 +141,7 @@ public class A2aAgent extends AgentBase {
     
     @Override
     protected Mono<Void> doObserve(Msg msg) {
-        // TODO Implement observe
+        memory.addMessage(msg);
         return Mono.empty();
     }
     
@@ -159,14 +159,24 @@ public class A2aAgent extends AgentBase {
         }
     }
     
+    /**
+     * Create a new {@link Builder} instance for {@link A2aAgent}.
+     *
+     * @return new builder instance
+     */
+    public static Builder builder() {
+        return new Builder();
+    }
+    
     private Client buildA2aClient(String name) {
-        ClientBuilder builder = Client.builder(this.a2aAgentConfig.agentCardProducer().produce(name));
+        ClientBuilder builder = Client.builder(this.agentCardResolver.getAgentCard(name));
         if (this.a2aAgentConfig.clientTransports().isEmpty()) {
             // Default Add The Basic JSON-RPC Transport
             builder.withTransport(JSONRPCTransport.class, new JSONRPCTransportConfig());
         } else {
             this.a2aAgentConfig.clientTransports().forEach(builder::withTransport);
         }
+        builder.clientConfig(this.a2aAgentConfig.clientConfig());
         return builder.build();
     }
     
@@ -192,7 +202,7 @@ public class A2aAgent extends AgentBase {
                 clientEventContext = new ClientEventContext(currentRequestId, A2aAgent.this);
                 a2aClient = buildA2aClient(preCallEvent.getAgent().getName());
                 LoggerUtil.debug(log, "[{}] A2aAgent build A2a Client with Agent Card: {}.", currentRequestId,
-                        a2aAgentConfig.agentCardProducer().produce(getName()));
+                        agentCardResolver.getAgentCard(getName()));
             } else if (event instanceof PostCallEvent) {
                 tryReleaseResource();
             } else if (event instanceof ErrorEvent errorEvent) {
@@ -214,6 +224,126 @@ public class A2aAgent extends AgentBase {
                 a2aClient = null;
                 LoggerUtil.debug(log, "[{}] A2aAgent close A2a Client.", currentRequestId);
             }
+        }
+    }
+    
+    public static class Builder {
+        
+        private String name;
+        
+        private AgentCardResolver agentCardResolver;
+        
+        private A2aAgentConfig a2aAgentConfig;
+        
+        private Memory memory = new InMemoryMemory();
+        
+        private final List<Hook> hooks = new ArrayList<>();
+        
+        /**
+         * Set the name of the A2aAgent.
+         *
+         * @param name the name to set
+         * @return the current Builder instance for method chaining
+         */
+        public Builder name(String name) {
+            this.name = name;
+            return this;
+        }
+        
+        /**
+         * Set the {@link AgentCard} for the A2aAgent.
+         *
+         * <p>It will be auto-generated to {@link FixedAgentCardResolver}.
+         *
+         * @param agentCard the AgentCard to set
+         * @return the current Builder instance for method chaining
+         * @see #agentCardResolver(AgentCardResolver)
+         */
+        public Builder agentCard(AgentCard agentCard) {
+            return agentCardResolver(FixedAgentCardResolver.builder().agentCard(agentCard).build());
+        }
+        
+        /**
+         * Set the {@link AgentCardResolver} for the A2aAgent.
+         *
+         * <p>When call {@link #agentCard(AgentCard)} and this method in one builder, the older called will affect.
+         *
+         * @param agentCardResolver the AgentCardResolver to set, null value will be ignored.
+         * @return the current Builder instance for method chaining
+         */
+        public Builder agentCardResolver(AgentCardResolver agentCardResolver) {
+            if (null == agentCardResolver) {
+                return this;
+            }
+            if (null != this.agentCardResolver) {
+                LoggerUtil.warn(log, "agentCardResolver {} will be replaced by {}",
+                        this.agentCardResolver.getClass().getSimpleName(),
+                        agentCardResolver.getClass().getSimpleName());
+            }
+            this.agentCardResolver = agentCardResolver;
+            return this;
+        }
+        
+        /**
+         * Set the {@link A2aAgentConfig} for the A2aAgent.
+         *
+         * @param a2aAgentConfig the A2aAgentConfig to set
+         * @return the current Builder instance for method chaining
+         */
+        public Builder a2aAgentConfig(A2aAgentConfig a2aAgentConfig) {
+            this.a2aAgentConfig = a2aAgentConfig;
+            return this;
+        }
+        
+        /**
+         * Set the {@link Memory} for the A2aAgent.
+         *
+         * <p>Default is {@link InMemoryMemory}
+         *
+         * @param memory the Memory to set
+         * @return the current Builder instance for method chaining
+         */
+        public Builder memory(Memory memory) {
+            this.memory = memory;
+            return this;
+        }
+        
+        /**
+         * Add a {@link Hook} to the A2aAgent.
+         *
+         * @param hook the Hook to add
+         * @return the current Builder instance for method chaining
+         */
+        public Builder hook(Hook hook) {
+            this.hooks.add(hook);
+            return this;
+        }
+        
+        /**
+         * Add multiple {@link Hook}s to the A2aAgent.
+         *
+         * @param hooks the list of Hooks to add
+         * @return the current Builder instance for method chaining
+         */
+        public Builder hooks(List<Hook> hooks) {
+            this.hooks.addAll(hooks);
+            return this;
+        }
+        
+        /**
+         * Build the A2aAgent instance.
+         *
+         * @return the built A2aAgent instance
+         * @throws IllegalArgumentException if agentCardResolver is not set
+         */
+        public A2aAgent build() {
+            if (null == this.agentCardResolver) {
+                throw new IllegalArgumentException("agentCardResolver is required");
+            }
+            if (null == this.a2aAgentConfig) {
+                this.a2aAgentConfig = A2aAgentConfig.builder().build();
+            }
+            return new A2aAgent(this.name, this.agentCardResolver, this.a2aAgentConfig, this.memory, this.hooks);
         }
     }
 }
