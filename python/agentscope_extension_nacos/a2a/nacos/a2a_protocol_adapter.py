@@ -33,6 +33,7 @@ from agentscope_runtime.engine.deployers.adapter.protocol_adapter import (
 )
 from .a2a_registry import (
     A2ARegistry,
+    A2ATransportsProperties,
     DeployProperties,
     create_registry_from_env,
 )
@@ -63,29 +64,29 @@ class A2AFastAPIExtensionAdapter(ProtocolAdapter):
     """
 
     def __init__(
-        self,
-        agent_name: str,
-        agent_description: str,
-        registry: Optional[Union[A2ARegistry, List[A2ARegistry]]] = None,
-        # AgentCard configuration
-        card_url: Optional[str] = None,
-        preferred_transport: Optional[str] = None,
-        additional_interfaces: list[AgentInterface] | None = None,
-        card_version: Optional[str] = None,
-        skills: Optional[List[AgentSkill]] = None,
-        default_input_modes: Optional[List[str]] = None,
-        default_output_modes: Optional[List[str]] = None,
-        provider: Optional[Union[str, Dict[str, Any], AgentProvider]] = None,
-        document_url: Optional[str] = None,
-        icon_url: Optional[str] = None,
-        security_schemes: dict[str, SecurityScheme] | None = None,
-        security: Optional[Dict[str, Any]] = None,
-        # Task configuration
-        task_timeout: Optional[int] = None,
-        task_event_timeout: Optional[int] = None,
-        # Wellknown configuration
-        wellknown_path: Optional[str] = None,
-        **kwargs: Any,
+            self,
+            agent_name: str,
+            agent_description: str,
+            registry: Optional[Union[A2ARegistry, List[A2ARegistry]]] = None,
+            # AgentCard configuration
+            card_url: Optional[str] = None,
+            preferred_transport: Optional[str] = None,
+            additional_interfaces: list[AgentInterface] | None = None,
+            card_version: Optional[str] = None,
+            skills: Optional[List[AgentSkill]] = None,
+            default_input_modes: Optional[List[str]] = None,
+            default_output_modes: Optional[List[str]] = None,
+            provider: Optional[Union[str, Dict[str, Any], AgentProvider]] = None,
+            documentation_url: Optional[str] = None,
+            icon_url: Optional[str] = None,
+            security_schemes: dict[str, SecurityScheme] | None = None,
+            security: Optional[Dict[str, Any]] = None,
+            # Task configuration
+            task_timeout: Optional[int] = None,
+            task_event_timeout: Optional[int] = None,
+            # Wellknown configuration
+            wellknown_path: Optional[str] = None,
+            **kwargs: Any,
     ) -> None:
         """Initialize A2A protocol adapter.
 
@@ -104,7 +105,7 @@ class A2AFastAPIExtensionAdapter(ProtocolAdapter):
             default_output_modes: Default output modes (default: ["text"])
             provider: Provider info (str/dict/AgentProvider,
                 str converted to dict)
-            document_url: Documentation URL
+            documentation_url: Documentation URL
             icon_url: Icon URL
             security_schemes: Security schemes configuration
             security: Security requirement configuration
@@ -153,7 +154,7 @@ class A2AFastAPIExtensionAdapter(ProtocolAdapter):
         self._default_input_modes = default_input_modes
         self._default_output_modes = default_output_modes
         self._provider = provider
-        self._document_url = document_url
+        self._documentation_url = documentation_url
         self._icon_url = icon_url
         self._security_schemes = security_schemes
         self._security = security
@@ -161,17 +162,17 @@ class A2AFastAPIExtensionAdapter(ProtocolAdapter):
         # Task configuration
         self._task_timeout = task_timeout or DEFAULT_TASK_TIMEOUT
         self._task_event_timeout = (
-            task_event_timeout or DEFAULT_TASK_EVENT_TIMEOUT
+                task_event_timeout or DEFAULT_TASK_EVENT_TIMEOUT
         )
 
         # Wellknown configuration
         self._wellknown_path = wellknown_path or DEFAULT_WELLKNOWN_PATH
 
     def add_endpoint(
-        self,
-        app: FastAPI,
-        func: Callable,
-        **kwargs: Any,
+            self,
+            app: FastAPI,
+            func: Callable,
+            **kwargs: Any,
     ) -> None:
         """Add A2A protocol endpoints to FastAPI application.
 
@@ -206,10 +207,10 @@ class A2AFastAPIExtensionAdapter(ProtocolAdapter):
             )
 
     def _register_with_all_registries(
-        self,
-        agent_card: AgentCard,
-        app: FastAPI,
-        **kwargs: Any,
+            self,
+            agent_card: AgentCard,
+            app: FastAPI,
+            **kwargs: Any,
     ) -> None:
         """Register agent with all configured registry instances.
 
@@ -221,6 +222,11 @@ class A2AFastAPIExtensionAdapter(ProtocolAdapter):
             **kwargs: Additional arguments
         """
         deploy_properties = self._build_deploy_properties(app, **kwargs)
+        a2a_transports_properties = self._build_a2a_transports_properties(
+            agent_card=agent_card,
+            app=app,
+            **kwargs,
+        )
 
         for registry in self._registry:
             registry_name = registry.registry_name()
@@ -232,6 +238,7 @@ class A2AFastAPIExtensionAdapter(ProtocolAdapter):
                 registry.register(
                     agent_card=agent_card,
                     deploy_properties=deploy_properties,
+                    a2a_transports_properties=a2a_transports_properties,
                 )
                 logger.info(
                     "[A2A] Successfully registered with registry: %s",
@@ -247,9 +254,9 @@ class A2AFastAPIExtensionAdapter(ProtocolAdapter):
                 )
 
     def _build_deploy_properties(
-        self,
-        app: FastAPI,
-        **kwargs: Any,
+            self,
+            app: FastAPI,
+            **kwargs: Any,
     ) -> DeployProperties:
         """Build DeployProperties from runtime configuration.
 
@@ -260,10 +267,10 @@ class A2AFastAPIExtensionAdapter(ProtocolAdapter):
         Returns:
             DeployProperties instance
         """
-        path = getattr(app, "root_path", "") or ""
         host = None
         port = None
 
+        # Inline _get_json_rpc_url() logic
         base = self._card_url or "http://127.0.0.1:8000"
         base_with_slash = base.rstrip("/") + "/"
         json_rpc_url = urljoin(
@@ -281,13 +288,74 @@ class A2AFastAPIExtensionAdapter(ProtocolAdapter):
         return DeployProperties(
             host=host,
             port=port,
-            path=path,
             extra=extra,
         )
 
+    def _build_a2a_transports_properties(
+            self,
+            agent_card: AgentCard,
+            app: FastAPI,
+            **kwargs: Any,
+    ) -> List[A2ATransportsProperties]:
+        """Build A2ATransportsProperties list from agent card and runtime config.
+
+        Args:
+            agent_card: The generated AgentCard
+            app: FastAPI application instance
+            **kwargs: Additional arguments
+
+        Returns:
+            List of A2aTransportsProperties instances
+        """
+        transports_list = []
+
+        # Build primary transport from card URL
+        base = self._card_url or "http://127.0.0.1:8000"
+        base_with_slash = base.rstrip("/") + "/"
+        json_rpc_url = urljoin(
+            base_with_slash,
+            self._json_rpc_path.lstrip("/"),
+        )
+
+        if json_rpc_url:
+            parsed = urlparse(json_rpc_url)
+            path = getattr(app, "root_path", "") or ""
+            support_tls = parsed.scheme == "https"
+
+            primary_transport = A2ATransportsProperties(
+                host=parsed.hostname,
+                port=parsed.port,
+                path=path,
+                support_tls=support_tls,
+                extra={},
+                transport_type="grpc",
+            )
+            transports_list.append(primary_transport)
+
+        # Add additional interfaces if configured
+        if self._additional_interfaces:
+            for interface in self._additional_interfaces:
+                if hasattr(interface, "url"):
+                    parsed = urlparse(interface.url)
+                    transport = A2ATransportsProperties(
+                        host=parsed.hostname,
+                        port=parsed.port,
+                        path=parsed.path or "",
+                        support_tls=parsed.scheme == "https",
+                        extra={},
+                        transport_type=getattr(
+                            interface,
+                            "transport",
+                            "grpc",
+                        ),
+                    )
+                    transports_list.append(transport)
+
+        return transports_list
+
     def _normalize_provider(
-        self,
-        provider: Optional[Union[str, Dict[str, Any], Any]],
+            self,
+            provider: Optional[Union[str, Dict[str, Any], Any]],
     ) -> Dict[str, Any]:
         """Normalize provider to dict format with organization and url.
 
@@ -333,14 +401,14 @@ class A2AFastAPIExtensionAdapter(ProtocolAdapter):
             return {"organization": "", "url": ""}
 
     def get_agent_card(
-        self,
-        app: Optional[FastAPI] = None,  # pylint: disable=unused-argument
+            self,
+            app: Optional[FastAPI] = None,  # pylint: disable=unused-argument
     ) -> AgentCard:
         """Build and return AgentCard with configured options.
 
         Constructs an AgentCard with all configured options, applying defaults
         where user values are not provided. Some fields like capabilities,
-        protocolVersion, etc. are set based on runtime implementation and
+        protocol_version, etc. are set based on runtime implementation and
         cannot be overridden by users.
 
         Args:
@@ -369,9 +437,9 @@ class A2AFastAPIExtensionAdapter(ProtocolAdapter):
             ),
             "skills": self._skills or [],
             "default_input_modes": self._default_input_modes
-            or DEFAULT_INPUT_OUTPUT_MODES,
+                                   or DEFAULT_INPUT_OUTPUT_MODES,
             "default_output_modes": self._default_output_modes
-            or DEFAULT_INPUT_OUTPUT_MODES,
+                                    or DEFAULT_INPUT_OUTPUT_MODES,
         }
 
         # Add optional transport fields
@@ -386,16 +454,16 @@ class A2AFastAPIExtensionAdapter(ProtocolAdapter):
         if self._provider:
             card_kwargs["provider"] = self._normalize_provider(self._provider)
 
-        # Add other optional fields (camelCase mapping)
-        field_mapping = {
-            "document_url": "documentation_url",
-            "icon_url": "icon_url",
-            "security_schemes": "security_schemes",
-            "security": "security",
-        }
-        for field, card_field in field_mapping.items():
+        # Add other optional fields (matching AgentCard field names)
+        optional_fields = [
+            "documentation_url",
+            "icon_url",
+            "security_schemes",
+            "security",
+        ]
+        for field in optional_fields:
             value = getattr(self, f"_{field}", None)
             if value is not None:
-                card_kwargs[card_field] = value
+                card_kwargs[field] = value
 
         return AgentCard(**card_kwargs)
