@@ -55,7 +55,7 @@ else:
         _NACOS_SDK_AVAILABLE = False
 
 # Import after conditional imports to avoid circular dependencies
-from agentscope_runtime.engine.deployers.adapter.a2a import (  # pylint: disable=wrong-import-position
+from .a2a_registry import (  # pylint: disable=wrong-import-position
     A2ARegistry,
     DeployProperties,
 )
@@ -303,49 +303,15 @@ class NacosRegistry(A2ARegistry):
         if self._nacos_client_config is not None:
             return self._nacos_client_config
 
-        # Load Nacos configuration from environment variables
-        # This ensures consistent behavior: loads from .env file if available,
-        # then falls back to system environment variables
-        import os
-        
-        nacos_server_addr = os.getenv("NACOS_SERVER_ADDR", "localhost:8848")
-        builder = ClientConfigBuilder().server_address(nacos_server_addr)
-        
-        logger.info(
-            "[NacosRegistry] Configuring Nacos client: server=%s",
-            nacos_server_addr,
+        # Use centralized config builder from a2a_registry module
+        # This ensures consistent behavior with env-based registry creation
+        from .a2a_registry import (
+            get_registry_settings,
+            _build_nacos_client_config,
         )
 
-        nacos_username = os.getenv("NACOS_USERNAME")
-        nacos_password = os.getenv("NACOS_PASSWORD")
-        if nacos_username and nacos_password:
-            builder.username(nacos_username).password(nacos_password)
-            logger.info(
-                "[NacosRegistry] Using basic authentication: username=%s",
-                nacos_username,
-            )
-
-        nacos_namespace_id = os.getenv("NACOS_NAMESPACE_ID")
-        if nacos_namespace_id:
-            builder.namespace_id(nacos_namespace_id)
-            logger.info(
-                "[NacosRegistry] Using namespace: %s",
-                nacos_namespace_id,
-            )
-
-        nacos_access_key = os.getenv("NACOS_ACCESS_KEY")
-        nacos_secret_key = os.getenv("NACOS_SECRET_KEY")
-        if nacos_access_key and nacos_secret_key:
-            builder.access_key(nacos_access_key).secret_key(nacos_secret_key)
-            logger.info(
-                "[NacosRegistry] Using access key authentication: key=%s",
-                nacos_access_key[:8] + "***",  # 只显示前8位
-            )
-        
-        # 设置日志级别以便调试
-        builder.log_level("INFO")
-
-        return builder.build()
+        settings = get_registry_settings()
+        return _build_nacos_client_config(settings)
 
     # pylint: disable=too-many-branches
     async def _register_to_nacos(

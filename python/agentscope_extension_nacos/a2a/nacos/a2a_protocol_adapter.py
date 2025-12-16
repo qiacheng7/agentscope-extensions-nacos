@@ -14,8 +14,6 @@ from a2a.server.apps import A2AFastAPIApplication
 from a2a.server.agent_execution.agent_executor import AgentExecutor
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
-from a2a.server.agent_execution.context import RequestContext
-from a2a.server.events.event_queue import EventQueue
 from a2a.types import (
     AgentCapabilities,
     AgentCard,
@@ -25,13 +23,26 @@ from a2a.types import (
     SecurityScheme,
 )
 from fastapi import FastAPI
-from google.protobuf import runtime_version
+from pydantic import ConfigDict
 
-from agentscope_extension_nacos.a2a.nacos.a2a_registry import A2ARegistry, DeployProperties
-
+from agentscope_runtime.version import __version__ as runtime_version
+from agentscope_runtime.engine.deployers.adapter.a2a.a2a_agent_adapter import (
+    A2AExecutor,
+)
 from agentscope_runtime.engine.deployers.adapter.protocol_adapter import (
     ProtocolAdapter,
 )
+from .a2a_registry import (
+    A2ARegistry,
+    DeployProperties,
+    create_registry_from_env,
+)
+
+# NOTE: Do NOT import NacosRegistry at module import time to avoid
+# forcing an optional dependency on environments that don't have nacos
+# SDK installed. Registry is optional: users must explicitly provide a
+# registry instance if needed.
+# from .nacos_a2a_registry import NacosRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -41,48 +52,6 @@ DEFAULT_TASK_TIMEOUT = 60
 DEFAULT_TASK_EVENT_TIMEOUT = 10
 DEFAULT_TRANSPORT = "JSONRPC"
 DEFAULT_INPUT_OUTPUT_MODES = ["text"]
-
-
-class FunctionAgentExecutor(AgentExecutor):
-    """Simple AgentExecutor implementation that wraps a callable function.
-    
-    This adapter allows using a simple function as an AgentExecutor.
-    """
-    
-    def __init__(self, func: Callable):
-        """Initialize with a callable function.
-        
-        Args:
-            func: A callable that takes a message and returns a response
-        """
-        self._func = func
-    
-    def execute(
-        self,
-        context: RequestContext,
-        event_queue: EventQueue,
-    ) -> None:
-        """Execute the agent function with the given context.
-        
-        Args:
-            context: Request context containing the input message
-            event_queue: Event queue for publishing updates
-        """
-        # Call the wrapped function with the message from context
-        # Note: This is a simplified implementation
-        # Real implementation might need to handle streaming, errors, etc.
-        try:
-            # Extract message from context and call function
-            result = self._func(context.request)
-            # Publish result to event queue if needed
-            # (implementation depends on specific requirements)
-        except Exception as e:
-            logger.error(f"Error executing agent function: {e}", exc_info=True)
-            raise
-    
-    def cancel(self) -> None:
-        """Cancel the execution (no-op for simple function executor)."""
-        pass
 
 
 class A2AFastAPIExtensionAdapter(ProtocolAdapter):
@@ -100,8 +69,6 @@ class A2AFastAPIExtensionAdapter(ProtocolAdapter):
         agent_description: str,
         registry: Optional[Union[A2ARegistry, List[A2ARegistry]]] = None,
         # AgentCard configuration
-        card_name: Optional[str] = None,
-        card_description: Optional[str] = None,
         card_url: Optional[str] = None,
         preferred_transport: Optional[str] = None,
         additional_interfaces: list[AgentInterface] | None = None,
@@ -124,13 +91,11 @@ class A2AFastAPIExtensionAdapter(ProtocolAdapter):
         """Initialize A2A protocol adapter.
 
         Args:
-            agent_name: Agent name (default for card_name)
-            agent_description: Agent description (default for card_description)
+            agent_name: Agent name used in card
+            agent_description: Agent description used in card
             registry: Optional A2A registry or list of registry instances
                 for service discovery. If None, registry operations
                 will be skipped.
-            card_name: Override agent card name
-            card_description: Override agent card description
             card_url: Override agent card URL (default: auto-generated)
             preferred_transport: Preferred transport type (default: "JSONRPC")
             additional_interfaces: Additional transport interfaces
@@ -162,6 +127,16 @@ class A2AFastAPIExtensionAdapter(ProtocolAdapter):
             self._registry: List[A2ARegistry] = []
         elif isinstance(registry, A2ARegistry):
             self._registry = [registry]
+        elif isinstance(registry, list):
+            # Validate all items in list are A2ARegistry instances
+            if not all(isinstance(r, A2ARegistry) for r in registry):
+                error_msg = (
+                    "[A2A] Invalid registry list: all items must be "
+                    "A2ARegistry instances"
+                )
+                logger.error(error_msg)
+                raise TypeError(error_msg)
+            self._registry = registry
         else:
             error_msg = (
                 f"[A2A] Invalid registry type: expected None, A2ARegistry, "
@@ -171,8 +146,6 @@ class A2AFastAPIExtensionAdapter(ProtocolAdapter):
             raise TypeError(error_msg)
 
         # AgentCard configuration
-        self._card_name = card_name
-        self._card_description = card_description
         self._card_url = card_url
         self._preferred_transport = preferred_transport
         self._additional_interfaces = additional_interfaces
@@ -209,15 +182,11 @@ class A2AFastAPIExtensionAdapter(ProtocolAdapter):
             **kwargs: Additional arguments for registry registration
         """
         request_handler = DefaultRequestHandler(
-            agent_executor=FunctionAgentExecutor(func=func),
+            agent_executor=A2AExecutor(func=func),
             task_store=InMemoryTaskStore(),
         )
 
-        agent_card = self.get_agent_card(
-            agent_name=self._agent_name,
-            agent_description=self._agent_description,
-            app=app,
-        )
+        agent_card = self.get_agent_card(app=app)
 
         server = A2AFastAPIApplication(
             agent_card=agent_card,
@@ -368,8 +337,6 @@ class A2AFastAPIExtensionAdapter(ProtocolAdapter):
 
     def get_agent_card(
         self,
-        agent_name: str,
-        agent_description: str,
         app: Optional[FastAPI] = None,  # pylint: disable=unused-argument
     ) -> AgentCard:
         """Build and return AgentCard with configured options.
@@ -380,9 +347,6 @@ class A2AFastAPIExtensionAdapter(ProtocolAdapter):
         cannot be overridden by users.
 
         Args:
-            agent_name: Agent name (used as default if card_name not set)
-            agent_description: Agent description (used as default if
-                card_description not set)
             app: Optional FastAPI app instance
 
         Returns:
@@ -390,8 +354,8 @@ class A2AFastAPIExtensionAdapter(ProtocolAdapter):
         """
         # Build required fields with defaults
         card_kwargs: Dict[str, Any] = {
-            "name": self._card_name or agent_name,
-            "description": self._card_description or agent_description,
+            "name": self._agent_name,
+            "description": self._agent_description,
             "url": self._card_url or self._get_json_rpc_url(),
             "version": self._card_version or runtime_version,
             "capabilities": AgentCapabilities(
